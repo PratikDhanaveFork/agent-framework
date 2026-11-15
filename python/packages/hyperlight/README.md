@@ -5,19 +5,32 @@ Hyperlight-backed CodeAct integrations for Microsoft Agent Framework.
 ## FIDES compatibility
 
 > [!WARNING]
-> **FIDES integration is not supported with CodeAct providers.** Host-tool calls
-> made inside generated code bypass the agent's function middleware, so FIDES
-> policy enforcement and label tracking do not apply to those nested calls or
-> intermediate code values. Checks on the outer `execute_code` invocation do not
-> enforce the policies of individual tools called inside it.
+> **Granular FIDES integration is not supported with CodeAct providers.** CodeAct
+> combines many tool calls inside one generated-code execution and consumes native
+> values with `skip_parsing=True`. Nested calls therefore bypass the normalized
+> `Content` boundary and function middleware where FIDES labels and policies apply.
 >
 > Registering tools with recognized FIDES `additional_properties` logs a warning,
 > but does not block execution. This is a best-effort diagnostic: FIDES also uses
 > defaults for unannotated tools, so no warning does not imply support or safety.
 > Keep tools that require FIDES as direct agent tools, not Hyperlight-managed tools,
 > and enforce authorization and destination restrictions inside host functions.
-> Sandbox isolation does not supply FIDES enforcement.
+> Sandbox isolation does not supply FIDES enforcement. For coarse-grained handling,
+> pass `additional_properties` to `HyperlightCodeActProvider` or
+> `HyperlightExecuteCodeTool`; those properties label the complete outer
+> `execute_code` result, not nested results, intermediate values, or prior side
+> effects.
 > See the [FIDES guide](../../samples/02-agents/security/FIDES_DEVELOPER_GUIDE.md).
+
+```python
+codeact = HyperlightCodeActProvider(
+    tools=[search, fetch],
+    additional_properties={
+        "source_integrity": "untrusted",
+        "confidentiality": "private",
+    },
+)
+```
 
 ## Error diagnostics
 
@@ -37,6 +50,40 @@ keys include it, so detailed-error callbacks are not reused for redacted runs.
 Initialization, snapshot restore, and execution failures follow the same policy.
 Failed sandbox entries are retired; cancellation and system-exit signals still
 propagate without becoming ordinary execution errors.
+
+## Execution limits
+
+Guest execution has a finite 30-second budget by default. Both
+`HyperlightCodeActProvider` and `HyperlightExecuteCodeTool` accept the host-side
+`execution_timeout_seconds` option, which must be a positive finite number.
+Applications that intentionally run longer must configure a larger budget.
+The option is captured in provider run snapshots and serialized state; it is
+not a model-controlled `execute_code` argument.
+
+Reaching the budget returns an error content with
+`Code execution exceeded its time limit.` Caller task cancellation interrupts
+guest execution and propagates `asyncio.CancelledError`. Cancellation waits for
+native execution and its interruption thread to finish, even if the caller
+cancels again. Queued cancellation does not interrupt another invocation.
+The next invocation restores the warm snapshot before reusing the sandbox.
+
+The budget starts on the sandbox's owning worker, not while waiting for that
+worker. Initialization and warm-up share the invocation's budget, but runtime
+initialization and host tool callbacks cannot be interrupted. Host tools must
+enforce their own cancellation and time limits. Completed results and unrelated
+execution failures are not replaced with a timeout that arrives late.
+
+Guest execution uses the cross-thread `Sandbox.interrupt_handle()` API documented
+for Hyperlight SDK 0.9.0 or later. Installation permits SDK 0.8.0, but guest
+execution still requires an SDK that provides this API.
+
+To run the native regressions on a KVM host with the required SDK and both
+backends installed:
+
+```bash
+HYPERLIGHT_RUN_GUEST_TESTS=true uv run --directory python/packages/hyperlight pytest \
+  tests/hyperlight/test_execution_limits.py -m integration
+```
 
 ## Installation
 
